@@ -23,3 +23,6 @@ screenshots/ui-report.txt
 # 用 npm run fetch-platform-tools 从本机 Android SDK 复制，
 # 或直接下载：https://developer.android.com/tools/releases/platform-tools
 resources/platform-tools/
+
+# TypeScript 增量构建缓存
+*.tsbuildinfo
