@@ -1,0 +1,25 @@
+# 依赖
+node_modules/
+
+# 构建产物
+out/
+release/
+dist/
+
+# 日志与临时文件
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 测试夹具与报告（由 npm run fixtures / ui:verify 生成）
+# 但 screenshots/*.png 是刻意提交的 —— README 需要它们
+scripts/.fixtures.json
+screenshots/ui-report.txt
+
+# 随包分发的 platform-tools
+# 这是 Google 的二进制（约 8MB），不适合入库。
+# 用 npm run fetch-platform-tools 从本机 Android SDK 复制，
+# 或直接下载：https://developer.android.com/tools/releases/platform-tools
+resources/platform-tools/

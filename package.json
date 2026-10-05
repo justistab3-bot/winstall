@@ -1,0 +1,96 @@
+{
+  "name": "winstall",
+  "version": "1.1.0",
+  "description": "Winstall - 简洁丝滑的 Android 应用安装器，自动识别设备架构与安卓版本",
+  "main": "./out/main/index.js",
+  "author": "Winstall",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "icon": "node scripts/run-electron.cjs scripts/make-icon.cjs",
+    "icon:verify": "node scripts/verify-ico.cjs",
+    "fetch-platform-tools": "node scripts/fetch-platform-tools.cjs",
+    "fixtures": "tsx scripts/make-fixtures.ts",
+    "ui:verify": "node scripts/run-electron.cjs scripts/ui-verify.cjs",
+    "ui:shots": "node scripts/run-electron.cjs scripts/screenshot.cjs",
+    "test:integration": "tsx scripts/integration-test.ts",
+    "test:integration:install": "tsx scripts/integration-test.ts --install",
+    "md3:test": "tsx scripts/md3-test.ts",
+    "dist": "electron-vite build && electron-builder --win",
+    "dist:dir": "electron-vite build && electron-builder --win --dir"
+  },
+  "build": {
+    "appId": "com.winstall.desktop",
+    "productName": "Winstall",
+    "copyright": "Winstall",
+    "electronDist": "node_modules/electron/dist",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**/*",
+      "package.json",
+      "!**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/platform-tools",
+        "to": "platform-tools",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-便携版.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Winstall",
+      "artifactName": "${productName}-${version}-安装包.${ext}"
+    }
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/icons-material": "^9.4.0",
+    "@mui/material": "^9.4.0",
+    "@types/node": "^26.6.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "framer-motion": "^14.0.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.6"
+  },
+  "allowScripts": {
+    "electron@44.5.1": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.2": true,
+    "electron-winstaller@5.4.0": true
+  }
+}
