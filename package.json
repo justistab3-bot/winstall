@@ -1,6 +1,6 @@
 {
   "name": "winstall",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Winstall - 简洁丝滑的 Android 应用安装器，自动识别设备架构与安卓版本",
   "main": "./out/main/index.js",
   "author": "Winstall",

@@ -10,9 +10,12 @@
  *  - 遇到加密条目 / data descriptor / 未知压缩方法时返回 null，不抛异常。
  */
 
-import { promises as fsp } from 'node:fs'
+import { createWriteStream, promises as fsp } from 'node:fs'
 import type { FileHandle } from 'node:fs/promises'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { inflateRawSync } from 'node:zlib'
+import { createInflateRaw } from 'node:zlib'
 
 /* --------------------------------- 常量 --------------------------------- */
 
@@ -373,6 +376,81 @@ export class ZipReader {
   async readText(name: string): Promise<string | null> {
     const buf = await this.readEntry(name)
     return buf ? buf.toString('utf8') : null
+  }
+
+  /**
+   * 把条目**流式**解压到磁盘，不经过内存。
+   *
+   * `readEntry` 有 256MB 上限（读清单、资源表这类小文件足够），
+   * 但分包容器里的 base.apk 动辄 300MB+，硬读进内存既慢又危险。
+   * 这里按 1MB 分块读取 → zlib 流式解压 → 直接写文件，内存占用恒定。
+   *
+   * 返回写入的字节数。
+   */
+  async extractToFile(name: string, destPath: string): Promise<number> {
+    const entry = this.lookup(name)
+    if (!entry) throw new Error(`压缩包内找不到 ${name}`)
+    if (entry.flags & FLAG_ENCRYPTED) throw new Error(`${name} 已加密，无法解压`)
+    if (entry.compressionMethod !== METHOD_STORE && entry.compressionMethod !== METHOD_DEFLATE) {
+      throw new Error(`${name} 使用了不支持的压缩方式（${entry.compressionMethod}）`)
+    }
+
+    const lfh = await readFully(this.src, entry.localHeaderOffset, 30)
+    if (!lfh || u32(lfh, 0) !== SIG_LFH) throw new Error(`读取 ${name} 的本地文件头失败`)
+    const dataStart = entry.localHeaderOffset + 30 + u16(lfh, 26) + u16(lfh, 28)
+
+    // 中央目录里的压缩大小可能不可信（streaming + data descriptor），
+    // 此时按下一个条目的本地头位置推断边界。
+    let compSize = entry.compressedSize
+    if (!(compSize > 0 && dataStart + compSize <= this.src.size)) {
+      compSize = this.src.size - dataStart
+      for (const other of this.entries) {
+        if (other === entry) continue
+        const off = other.localHeaderOffset
+        if (off > entry.localHeaderOffset && off - dataStart < compSize) compSize = off - dataStart
+      }
+      if (compSize <= 0) throw new Error(`无法确定 ${name} 的数据范围`)
+    }
+
+    const source = this.chunkStream(dataStart, compSize)
+    const sink = createWriteStream(destPath)
+
+    if (entry.compressionMethod === METHOD_STORE) {
+      await pipeline(source, sink)
+    } else {
+      await pipeline(source, createInflateRaw(), sink)
+    }
+
+    const st = await fsp.stat(destPath)
+    return st.size
+  }
+
+  /** 从文件的指定区间分块读出，供流式解压使用 */
+  private chunkStream(offset: number, length: number): Readable {
+    const src = this.src
+    const CHUNK = 1 << 20 // 1MB
+    let pos = offset
+    const end = offset + length
+    return new Readable({
+      async read() {
+        try {
+          if (pos >= end) {
+            this.push(null)
+            return
+          }
+          const want = Math.min(CHUNK, end - pos)
+          const buf = await src.read(pos, want)
+          if (!buf || buf.length === 0) {
+            this.push(null)
+            return
+          }
+          pos += buf.length
+          this.push(buf)
+        } catch (err) {
+          this.destroy(err as Error)
+        }
+      }
+    })
   }
 
   async close(): Promise<void> {

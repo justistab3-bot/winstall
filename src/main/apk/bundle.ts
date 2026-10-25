@@ -1,12 +1,8 @@
 import { mkdirSync, rmSync } from 'node:fs'
-import { writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { classifySplit, detectBundleKind } from '../../shared/bundle'
 import type { BundleKind, SplitApk } from '../../shared/types'
 import { ZipReader } from './zip'
-
-/** 单个条目的解压上限：超过这个体积就别硬塞进内存了 */
-const MAX_ENTRY_BYTES = 400 * 1024 * 1024
 
 export interface BundleScan {
   kind: BundleKind
@@ -154,21 +150,18 @@ export class BundleExtractor {
     return new BundleExtractor(reader, destDir)
   }
 
-  /** 解压一个条目，返回本地文件路径 */
+  /**
+   * 解压一个条目，返回本地文件路径。
+   * 走流式解压 —— base.apk 可能有几百 MB，不能整个读进内存。
+   */
   async extract(entryName: string, outName?: string): Promise<string> {
     const entry = this.reader.getEntry(entryName)
     if (!entry) throw new Error(`压缩包内找不到 ${entryName}`)
-    if (entry.uncompressedSize > MAX_ENTRY_BYTES) {
-      throw new Error(`${entryName} 解压后体积过大（${Math.round(entry.uncompressedSize / 1024 / 1024)}MB）`)
-    }
-
-    const buf = await this.reader.readEntry(entryName)
-    if (!buf) throw new Error(`解压 ${entryName} 失败`)
 
     // 条目名可能带目录，输出时只保留安全字符
     const safe = (outName ?? (entryName.split('/').pop() ?? 'entry')).replace(/[^\w.\-]/g, '_')
     const dest = path.join(this.destDir, safe)
-    await writeFile(dest, buf)
+    await this.reader.extractToFile(entryName, dest)
     return dest
   }
 

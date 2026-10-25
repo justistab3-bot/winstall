@@ -239,10 +239,135 @@ async function testRealFile(filePath: string): Promise<void> {
 }
 
 /* ------------------------------------------------------------------ */
+/* 4. 大条目流式解压（回归：旧实现有 256MB 上限）                        */
+/* ------------------------------------------------------------------ */
+
+function crc32(buf: Buffer): number {
+  let table = crc32.table
+  if (!table) {
+    table = new Int32Array(256)
+    for (let n = 0; n < 256; n++) {
+      let c = n
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+      table[n] = c
+    }
+    crc32.table = table
+  }
+  let crc = -1
+  for (let i = 0; i < buf.length; i++) crc = (crc >>> 8) ^ table[(crc ^ buf[i]) & 0xff]
+  return (crc ^ -1) >>> 0
+}
+// eslint-disable-next-line @typescript-eslint/no-namespace
+declare namespace crc32 {
+  let table: Int32Array | undefined
+}
+
+/** 最小 ZIP 写入器（仅 STORE，足够构造测试样本） */
+function buildStoredZip(entries: Array<{ name: string; data: Buffer }>): Buffer {
+  const locals: Buffer[] = []
+  const centrals: Buffer[] = []
+  let offset = 0
+
+  for (const e of entries) {
+    const nameBuf = Buffer.from(e.name, 'utf8')
+    const crc = crc32(e.data)
+
+    const local = Buffer.alloc(30 + nameBuf.length)
+    local.writeUInt32LE(0x04034b50, 0)
+    local.writeUInt16LE(20, 4)
+    local.writeUInt16LE(0, 6)
+    local.writeUInt16LE(0, 8) // STORE
+    local.writeUInt16LE(0, 10)
+    local.writeUInt16LE(0, 12)
+    local.writeUInt32LE(crc, 14)
+    local.writeUInt32LE(e.data.length, 18)
+    local.writeUInt32LE(e.data.length, 22)
+    local.writeUInt16LE(nameBuf.length, 26)
+    local.writeUInt16LE(0, 28)
+    nameBuf.copy(local, 30)
+
+    const central = Buffer.alloc(46 + nameBuf.length)
+    central.writeUInt32LE(0x02014b50, 0)
+    central.writeUInt16LE(20, 4)
+    central.writeUInt16LE(20, 6)
+    central.writeUInt16LE(0, 8)
+    central.writeUInt16LE(0, 10) // STORE
+    central.writeUInt16LE(0, 12)
+    central.writeUInt16LE(0, 14)
+    central.writeUInt32LE(crc, 16)
+    central.writeUInt32LE(e.data.length, 20)
+    central.writeUInt32LE(e.data.length, 24)
+    central.writeUInt16LE(nameBuf.length, 28)
+    central.writeUInt16LE(0, 30)
+    central.writeUInt16LE(0, 32)
+    central.writeUInt16LE(0, 34)
+    central.writeUInt16LE(0, 36)
+    central.writeUInt32LE(0, 38)
+    central.writeUInt32LE(offset, 42)
+    nameBuf.copy(central, 46)
+
+    locals.push(local, e.data)
+    centrals.push(central)
+    offset += local.length + e.data.length
+  }
+
+  const cd = Buffer.concat(centrals)
+  const eocd = Buffer.alloc(22)
+  eocd.writeUInt32LE(0x06054b50, 0)
+  eocd.writeUInt16LE(0, 4)
+  eocd.writeUInt16LE(0, 6)
+  eocd.writeUInt16LE(entries.length, 8)
+  eocd.writeUInt16LE(entries.length, 10)
+  eocd.writeUInt32LE(cd.length, 12)
+  eocd.writeUInt32LE(offset, 16)
+  eocd.writeUInt16LE(0, 20)
+
+  return Buffer.concat([...locals, cd, eocd])
+}
+
+async function testLargeEntry(): Promise<void> {
+  section('4. 大条目流式解压（回归：旧实现硬上限 256MB）')
+
+  const { mkdtempSync, rmSync, statSync, writeFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { ZipReader } = await import('../src/main/apk/zip')
+
+  // 300MB —— 故意超过旧实现里 MAX_ENTRY_SIZE = 256MB 的上限
+  const SIZE = 300 * 1024 * 1024
+  const dir = mkdtempSync(`${tmpdir()}\\winstall-zip-test-`)
+  const zipPath = `${dir}\\large.zip`
+  const outPath = `${dir}\\large.bin`
+
+  try {
+    // 用一段可复现的填充数据，而不是全零（全零会让 CRC 校验失去意义）
+    const chunk = Buffer.alloc(1024 * 1024)
+    for (let i = 0; i < chunk.length; i++) chunk[i] = (i * 31 + 7) & 0xff
+    const parts: Buffer[] = []
+    for (let i = 0; i < SIZE / chunk.length; i++) parts.push(chunk)
+    writeFileSync(zipPath, buildStoredZip([{ name: 'base.apk', data: Buffer.concat(parts) }]))
+    parts.length = 0
+
+    const reader = await ZipReader.open(zipPath)
+    const written = await reader.extractToFile('base.apk', outPath)
+    await reader.close()
+
+    const onDisk = statSync(outPath).size
+    check(
+      `300MB 条目流式解压成功（旧实现在 256MB 处返回 null）`,
+      written === SIZE && onDisk === SIZE,
+      `写入 ${Math.round(written / 1024 / 1024)}MB / 落盘 ${Math.round(onDisk / 1024 / 1024)}MB`
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+/* ------------------------------------------------------------------ */
 
 async function main(): Promise<void> {
   testClassifier()
   testSelection()
+  await testLargeEntry()
 
   const target = process.argv[2]
   if (target) {

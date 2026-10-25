@@ -38,6 +38,8 @@ export function App() {
   const [adb, setAdb] = useState<AdbStatus | null>(null)
   const [color, setColor] = useState<DynamicColorState | null>(null)
   const [apks, setApks] = useState<ApkInfo[]>([])
+  /** 正在解析安装包（分包容器解压 base 需要几秒，必须有可见反馈） */
+  const [parsing, setParsing] = useState(false)
   const [activeIndex, setActiveIndex] = useState(0)
   const [progress, setProgress] = useState<InstallProgress | null>(null)
   const [dragging, setDragging] = useState(false)
@@ -124,38 +126,85 @@ export function App() {
 
   /* ----------------------------- 交互 ----------------------------- */
 
-  const loadPaths = useCallback(async (paths: string[]) => {
-    const apkPaths = paths.filter((p) => APK_RE.test(p))
-    const skipped = paths.length - apkPaths.length
-    if (apkPaths.length === 0) {
-      setToast({
-        message: '这不是安装包',
-        detail: '请拖入 .apk 文件（也支持 .apks / .xapk）。',
-        severity: 'warning'
-      })
-      return
-    }
-    const parsed = await window.api.parseApk(apkPaths)
-    const usable = parsed.filter((p) => !p.parseError || p.packageName)
-    setApks(usable)
-    setActiveIndex(0)
-    setProgress(null)
-    setLastInstalled(null)
+  const parseAndLoad = useCallback(
+    async (apkPaths: string[], skipped: number) => {
+      const parsed = await window.api.parseApk(apkPaths)
+      const usable = parsed.filter((p) => !p.parseError || p.packageName)
+      const broken = parsed.filter((p) => !usable.includes(p))
 
-    if (skipped > 0) {
-      setToast({
-        message: `已载入 ${usable.length} 个安装包`,
-        detail: `忽略了 ${skipped} 个非 APK 文件。`,
-        severity: 'info'
-      })
-    } else if (usable.length > 1) {
-      setToast({
-        message: `已载入 ${usable.length} 个安装包`,
-        detail: usable.length > 1 && settings?.batchInstall ? '将按顺序依次安装' : undefined,
-        severity: 'info'
-      })
-    }
-  }, [settings?.batchInstall])
+      // 全部读取失败时必须说话 —— 之前这里直接 return，界面上什么都看不到
+      if (usable.length === 0) {
+        setApks([])
+        setActiveIndex(0)
+        setProgress(null)
+        setLastInstalled(null)
+        setToast({
+          message: '无法读取这个安装包',
+          detail:
+            broken[0]?.parseError ??
+            '文件可能已损坏、下载不完整，或不是有效的 APK / APKS / XAPK。',
+          severity: 'error'
+        })
+        return
+      }
+
+      setApks(usable)
+      setActiveIndex(0)
+      setProgress(null)
+      setLastInstalled(null)
+
+      if (broken.length > 0) {
+        setToast({
+          message: `已载入 ${usable.length} 个安装包，${broken.length} 个读取失败`,
+          detail: broken[0]?.parseError ?? undefined,
+          severity: 'warning'
+        })
+      } else if (skipped > 0) {
+        setToast({
+          message: `已载入 ${usable.length} 个安装包`,
+          detail: `忽略了 ${skipped} 个非 APK 文件。`,
+          severity: 'info'
+        })
+      } else if (usable.length > 1) {
+        setToast({
+          message: `已载入 ${usable.length} 个安装包`,
+          detail: settings?.batchInstall ? '将按顺序依次安装' : undefined,
+          severity: 'info'
+        })
+      }
+    },
+    [settings?.batchInstall]
+  )
+
+  const loadPaths = useCallback(
+    async (paths: string[]) => {
+      const apkPaths = paths.filter((p) => APK_RE.test(p))
+      const skipped = paths.length - apkPaths.length
+      if (apkPaths.length === 0) {
+        setToast({
+          message: '这不是安装包',
+          detail: '请拖入 .apk 文件（也支持 .apks / .xapk）。',
+          severity: 'warning'
+        })
+        return
+      }
+
+      // 分包容器可能有几百 MB，解压 base 需要几秒，必须有可见的进行中状态
+      setParsing(true)
+      try {
+        await parseAndLoad(apkPaths, skipped)
+      } catch (err) {
+        setToast({
+          message: '读取安装包时出错',
+          detail: err instanceof Error ? err.message : String(err),
+          severity: 'error'
+        })
+      } finally {
+        setParsing(false)
+      }
+    },
+    [parseAndLoad]
+  )
 
   const handlePick = useCallback(async () => {
     const paths = await window.api.pickApk()
@@ -329,6 +378,7 @@ export function App() {
           installedPkg={installedPkg}
           batch={batch}
           dragging={dragging}
+          parsing={parsing}
           settingsOpen={settingsOpen}
           appsOpen={appsOpen}
           logsOpen={logsOpen}
@@ -383,6 +433,8 @@ interface ShellProps {
   installedPkg: { packageName: string; label: string } | null
   batch: { running: boolean; index: number; total: number }
   dragging: boolean
+  /** 正在解析安装包 */
+  parsing: boolean
   settingsOpen: boolean
   appsOpen: boolean
   logsOpen: boolean
@@ -516,7 +568,12 @@ function Shell(p: ShellProps) {
                 onPick={p.onPick}
               />
             ) : (
-              <DropZone key="drop" onPick={p.onPick} dragging={p.dragging} />
+              <DropZone
+                key="drop"
+                onPick={p.onPick}
+                dragging={p.dragging}
+                parsing={p.parsing}
+              />
             )}
           </AnimatePresence>
         </Stack>

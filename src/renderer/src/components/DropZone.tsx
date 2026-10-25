@@ -8,17 +8,19 @@ interface Props {
   onPick: () => void
   /** 有文件正悬停在窗口上方 */
   dragging: boolean
+  /** 正在解析安装包：分包容器要解压 base，可能有几秒 */
+  parsing?: boolean
   disabled?: boolean
 }
 
-export function DropZone({ onPick, dragging, disabled }: Props) {
+export function DropZone({ onPick, dragging, parsing = false, disabled }: Props) {
   const t = useTokens()
 
   return (
     <Box
       component={motion.div}
       layout
-      onClick={disabled ? undefined : onPick}
+      onClick={disabled || parsing ? undefined : onPick}
       animate={{
         scale: dragging ? 1.012 : 1,
         borderColor: dragging ? t.primary : t.outlineVariant,
@@ -32,7 +34,7 @@ export function DropZone({ onPick, dragging, disabled }: Props) {
         minHeight: 208,
         display: 'grid',
         placeItems: 'center',
-        cursor: disabled ? 'default' : 'pointer',
+        cursor: disabled || parsing ? 'default' : 'pointer',
         position: 'relative',
         overflow: 'hidden',
         opacity: disabled ? 0.55 : 1,
@@ -62,9 +64,9 @@ export function DropZone({ onPick, dragging, disabled }: Props) {
       <Stack spacing={1.75} sx={{ alignItems: 'center', position: 'relative', py: 4, px: 3 }}>
         <Box
           component={motion.div}
-          animate={{ y: dragging ? -7 : [0, -5, 0] }}
+          animate={{ y: parsing ? 0 : dragging ? -7 : [0, -5, 0] }}
           transition={
-            dragging
+            parsing || dragging
               ? { type: 'spring', stiffness: 420, damping: 22 }
               : { duration: 3.6, repeat: Infinity, ease: 'easeInOut' }
           }
@@ -74,20 +76,37 @@ export function DropZone({ onPick, dragging, disabled }: Props) {
             borderRadius: '18px',
             display: 'grid',
             placeItems: 'center',
-            backgroundColor: dragging ? t.primaryContainer : t.surfaceContainerHighest,
-            color: dragging ? t.onPrimaryContainer : t.onSurfaceVariant,
+            backgroundColor: dragging || parsing ? t.primaryContainer : t.surfaceContainerHighest,
+            color: dragging || parsing ? t.onPrimaryContainer : t.onSurfaceVariant,
             transition: 'background-color 240ms cubic-bezier(0.2,0,0,1)'
           }}
         >
-          <Inventory2RoundedIcon sx={{ fontSize: 33 }} />
+          {parsing ? (
+            <Box
+              component={motion.div}
+              animate={{ rotate: 360 }}
+              transition={{ duration: 1.1, repeat: Infinity, ease: 'linear' }}
+              sx={{
+                width: 26,
+                height: 26,
+                borderRadius: '50%',
+                border: `2.5px solid ${t.onPrimaryContainer}33`,
+                borderTopColor: t.onPrimaryContainer
+              }}
+            />
+          ) : (
+            <Inventory2RoundedIcon sx={{ fontSize: 33 }} />
+          )}
         </Box>
 
         <Box sx={{ textAlign: 'center' }}>
           <Typography sx={{ fontSize: 17, fontWeight: 650, color: t.onSurface, letterSpacing: '-0.01em' }}>
-            {dragging ? '松开即可载入安装包' : '拖入 APK 安装包'}
+            {parsing ? '正在读取安装包…' : dragging ? '松开即可载入安装包' : '拖入 APK 安装包'}
           </Typography>
           <Typography sx={{ fontSize: 12.5, color: t.onSurfaceVariant, mt: 0.5 }}>
-            也可以点击此处从文件管理器选择，支持 .apk / .apks / .xapk，可同时拖入多个
+            {parsing
+              ? '分包容器需要解压 base 分包，大文件可能要几秒'
+              : '也可以点击此处从文件管理器选择，支持 .apk / .apks / .xapk，可同时拖入多个'}
           </Typography>
         </Box>
 
