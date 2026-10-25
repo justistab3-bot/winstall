@@ -1,6 +1,6 @@
 {
   "name": "winstall",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Winstall - 简洁丝滑的 Android 应用安装器，自动识别设备架构与安卓版本",
   "main": "./out/main/index.js",
   "author": "Winstall",
@@ -21,6 +21,7 @@
     "ui:shots": "node scripts/run-electron.cjs scripts/screenshot.cjs",
     "test:integration": "tsx scripts/integration-test.ts",
     "test:integration:install": "tsx scripts/integration-test.ts --install",
+    "test:bundle": "tsx scripts/bundle-test.ts",
     "md3:test": "tsx scripts/md3-test.ts",
     "dist": "electron-vite build && electron-builder --win",
     "dist:dir": "electron-vite build && electron-builder --win --dir"

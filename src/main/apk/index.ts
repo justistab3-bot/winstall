@@ -23,10 +23,12 @@
  */
 
 import { promises as fsp } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { deflateSync } from 'node:zlib'
 
 import type { ApkInfo } from '../../shared/types'
+import { BundleExtractor, isBundlePath, scanBundle } from './bundle'
 import { ZipReader } from './zip'
 import {
   attrRefId,
@@ -1203,11 +1205,136 @@ export interface ApkParseDetails {
 
 /**
  * 解析 APK，返回 ApkInfo。
- * **永不 reject**：文件不存在/不可读时返回 fileSize=0 且 parseError 已填充的对象。
+ * `.apks` / `.xapk` / `.apkm` 会走分包流程：扫描中央目录拿到分包清单，
+ * 只解压 base 分包来读取包名、版本、图标等元信息。
+ * **永不 reject**：失败时返回 parseError 已填充的对象。
  */
 export async function parseApk(filePath: string): Promise<ApkInfo> {
+  if (isBundlePath(filePath)) return parseBundleApk(filePath)
   const details = await parseApkDetailed(filePath)
   return details.info
+}
+
+/**
+ * 解析分包容器。
+ * 元信息全部来自 base 分包 —— 配置分包里没有 AndroidManifest。
+ */
+async function parseBundleApk(filePath: string): Promise<ApkInfo> {
+  const parsedAt = Date.now()
+  const fileName = path.basename(filePath)
+  const base = await scanBundle(filePath)
+
+  if (base.error || !base.baseEntry) {
+    return {
+      filePath,
+      fileName,
+      fileSize: await fsp
+        .stat(filePath)
+        .then((s) => s.size)
+        .catch(() => 0),
+      packageName: null,
+      versionName: null,
+      versionCode: null,
+      minSdk: null,
+      targetSdk: null,
+      compileSdk: null,
+      appLabel: null,
+      iconDataUrl: null,
+      nativeAbis: [],
+      hasNativeLibs: false,
+      debuggable: false,
+      testOnly: false,
+      isSplit: false,
+      permissions: [],
+      parseError: base.error ?? '找不到 base 分包',
+      parsedAt,
+      bundleKind: base.kind,
+      bundle: {
+        kind: base.kind,
+        splits: base.splits,
+        obbFiles: base.obbEntries,
+        selectedCount: 0,
+        selectedBytes: 0,
+        warning: null,
+        error: base.error ?? '找不到 base 分包'
+      }
+    }
+  }
+
+  // 只解 base：配置分包里没有清单文件，没必要解
+  const tmpDir = path.join(tmpdir(), `winstall-bundle-${parsedAt.toString(36)}`)
+  let extractor: BundleExtractor | null = null
+  try {
+    extractor = await BundleExtractor.open(filePath, tmpDir)
+    const localBase = await extractor.extract(base.baseEntry, 'base.apk')
+    const inner = await parseApkDetailed(localBase)
+
+    const info: ApkInfo = {
+      ...inner.info,
+      filePath,
+      fileName,
+      fileSize: await fsp
+        .stat(filePath)
+        .then((s) => s.size)
+        .catch(() => 0),
+      // 分包容器本身不是 split APK，isSplit 只对「单独的配置分包」有意义
+      isSplit: false,
+      parsedAt,
+      bundleKind: base.kind,
+      bundle: {
+        kind: base.kind,
+        splits: base.splits,
+        obbFiles: base.obbEntries,
+        selectedCount: 0,
+        selectedBytes: 0,
+        warning: null,
+        error: null
+      }
+    }
+
+    if (!info.packageName && base.manifestPackage) {
+      // XAPK 清单里写了包名，base 解析不出来时兜底
+      info.packageName = base.manifestPackage
+    }
+    if (!info.packageName && !info.parseError) {
+      info.parseError = 'base 分包里没有解析到包名'
+    }
+    return info
+  } catch (err) {
+    return {
+      filePath,
+      fileName,
+      fileSize: 0,
+      packageName: null,
+      versionName: null,
+      versionCode: null,
+      minSdk: null,
+      targetSdk: null,
+      compileSdk: null,
+      appLabel: null,
+      iconDataUrl: null,
+      nativeAbis: [],
+      hasNativeLibs: false,
+      debuggable: false,
+      testOnly: false,
+      isSplit: false,
+      permissions: [],
+      parseError: `分包解析失败：${err instanceof Error ? err.message : String(err)}`,
+      parsedAt,
+      bundleKind: base.kind,
+      bundle: {
+        kind: base.kind,
+        splits: base.splits,
+        obbFiles: base.obbEntries,
+        selectedCount: 0,
+        selectedBytes: 0,
+        warning: null,
+        error: err instanceof Error ? err.message : String(err)
+      }
+    }
+  } finally {
+    await extractor?.dispose().catch(() => undefined)
+  }
 }
 
 /** 带扩展信息的解析入口 */
@@ -1233,7 +1360,9 @@ export async function parseApkDetailed(filePath: string): Promise<ApkParseDetail
     isSplit: false,
     permissions: [],
     parseError: null,
-    parsedAt
+    parsedAt,
+    bundleKind: 'apk',
+    bundle: null
   }
   const warnings: string[] = []
   let launchableActivity: string | null = null

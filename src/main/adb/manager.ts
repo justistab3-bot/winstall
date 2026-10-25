@@ -361,6 +361,12 @@ export class AdbManager extends EventEmitter {
 
   /** 用户设置的 adb 路径覆盖 */
   adbPathOverride = ''
+  /**
+   * 是否在设备富化时顺带检测 root。
+   * 检测会执行 `su -c id`，在 Magisk/SuperSU 上会弹授权框 ——
+   * 所以只有用户开启了「Root 强制安装」才去测，避免无谓打扰。
+   */
+  detectRootOnEnrich = false
 
   /* ---------------------------- 状态 ---------------------------- */
 
@@ -670,8 +676,11 @@ export class AdbManager extends EventEmitter {
       manufacturer: null,
       brand: null,
       isEmulator: false,
+      densityDpi: null,
+      locale: null,
       storageFreeBytes: null,
-      batteryLevel: null
+      batteryLevel: null,
+      hasRoot: null
     }
   }
 
@@ -736,8 +745,29 @@ export class AdbManager extends EventEmitter {
     'getprop ro.product.brand',
     'getprop ro.build.characteristics',
     'getprop ro.hardware',
+    'getprop ro.sf.lcd_density',
+    'getprop persist.sys.locale',
+    'getprop ro.product.locale',
     'df /data'
   ].join('; ')
+
+  /** df 输出从第几行开始 —— PROBE 里 df 之前有 14 条 getprop */
+  private static readonly DF_LINE_INDEX = 14
+
+  /**
+   * 检测设备是否具备 root 权限。
+   * 通过 `su -c id` 判断 —— 输出里出现 `uid=0` 才算真的拿到了 root。
+   * 首次调用会在设备上弹授权框，超时时间给得比较宽松。
+   */
+  async checkRoot(device: DeviceInfo): Promise<boolean> {
+    const r = await this.shellOn(device, 'su -c id', 25000)
+    const ok = r.code === 0 && /uid=0/.test(r.stdout)
+    if (device.hasRoot !== ok) {
+      device.hasRoot = ok
+      this.emitDevices()
+    }
+    return ok
+  }
 
   /**
    * 富化设备信息（系统版本 / ABI / 存储）。
@@ -811,10 +841,19 @@ export class AdbManager extends EventEmitter {
         /goldfish|ranchu|generic_x86|vbox|qemu/.test(hardware) ||
         /sdk_gphone|emulator/.test((dev.model ?? '').toLowerCase())
 
-      dev.storageFreeBytes = parseDfFreeBytes(rows.slice(11).join('\n'))
+      const dpi = Number((rows[11] ?? '').trim())
+      dev.densityDpi = Number.isFinite(dpi) && dpi > 0 ? dpi : null
+      dev.locale = ((rows[12] ?? '').trim() || (rows[13] ?? '').trim() || null)
+
+      dev.storageFreeBytes = parseDfFreeBytes(
+        rows.slice(AdbManager.DF_LINE_INDEX).join('\n')
+      )
       dev.enriched = true
       dev.enrichError = null
       this.emitDevices()
+
+      // root 检测放最后：它可能弹授权框，不该拖慢基本信息的显示
+      if (this.detectRootOnEnrich) void this.checkRoot(dev)
     } catch (err) {
       dev.enrichError = err instanceof Error ? err.message : String(err)
       dev.enriched = true

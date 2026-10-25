@@ -214,6 +214,39 @@ export function SettingsDialog({ open, settings, device, color, onChange, onClos
         />
 
         <Divider sx={{ my: 1.5 }} />
+        <SectionTitle>Root 强制安装</SectionTitle>
+
+        <Row
+          title="通过 root 执行安装"
+          desc={
+            device?.hasRoot === true
+              ? '当前设备已有 root 权限。安装会以 root 身份执行 pm，可绕过厂商的 USB 安装限制、版本降级限制等。'
+              : device?.hasRoot === false
+                ? '当前设备没有可用的 root（su 不可用）。开启后仍会先尝试普通安装。'
+                : '开启后会用 su 执行安装命令，可绕过厂商限制与部分校验。首次会请求 root 授权，请在设备上点「允许」。'
+          }
+          control={
+            <Switch
+              checked={settings.rootInstall}
+              onChange={(e) => onChange({ rootInstall: e.target.checked })}
+            />
+          }
+        />
+
+        <Row
+          title="签名冲突时先卸载旧版本"
+          desc="普通覆盖安装遇到签名不一致必然失败。开启后会自动卸载旧版本再装 —— 注意这会清除该应用的全部数据。"
+          disabled={!settings.rootInstall}
+          control={
+            <Switch
+              checked={settings.rootForceUninstall}
+              disabled={!settings.rootInstall}
+              onChange={(e) => onChange({ rootForceUninstall: e.target.checked })}
+            />
+          }
+        />
+
+        <Divider sx={{ my: 1.5 }} />
         <SectionTitle>ADB</SectionTitle>
 
         <Box sx={{ py: 1.25 }}>

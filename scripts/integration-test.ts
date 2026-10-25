@@ -19,7 +19,7 @@ import { AppManager } from '../src/main/apps'
 import { Installer } from '../src/main/installer'
 import { parseApk } from '../src/main/apk'
 import { evaluateCompat, pickMatchedAbi } from '../src/shared/compat'
-import type { ApkInfo, DeviceInfo, InstallProgress } from '../src/shared/types'
+import type { ApkInfo, DeviceInfo, InstallOptions, InstallProgress } from '../src/shared/types'
 
 const SAMPLES = 'D:\\worker\\_apk_samples'
 const DO_INSTALL = process.argv.includes('--install')
@@ -59,6 +59,8 @@ function fakeApk(over: Partial<ApkInfo>): ApkInfo {
     permissions: [],
     parseError: null,
     parsedAt: Date.now(),
+    bundleKind: 'apk',
+    bundle: null,
     ...over
   }
 }
@@ -85,8 +87,24 @@ function fakeDevice(over: Partial<DeviceInfo>): DeviceInfo {
     manufacturer: null,
     brand: null,
     isEmulator: false,
+    densityDpi: 480,
+    locale: 'zh-CN',
     storageFreeBytes: 8_000_000_000,
     batteryLevel: null,
+    hasRoot: null,
+    ...over
+  }
+}
+
+function fakeOptions(over: Partial<InstallOptions> = {}): InstallOptions {
+  return {
+    replace: true,
+    grantAll: true,
+    allowDowngrade: false,
+    allowTest: false,
+    launchAfterInstall: false,
+    rootInstall: false,
+    rootForceUninstall: false,
     ...over
   }
 }
@@ -333,22 +351,10 @@ async function main(): Promise<void> {
   console.log(`  结论: ${targetReport.headline}  可安装=${targetReport.installable}`)
 
   // pm install 参数组装：-g 只能在 API 23+ 出现
-  const args22 = installer.buildInstallArgs(fakeDevice({ sdkInt: 22 }), {
-    replace: true,
-    grantAll: true,
-    allowDowngrade: false,
-    allowTest: false,
-    launchAfterInstall: false
-  }, '/data/local/tmp/x.apk')
+  const args22 = installer.buildInstallArgs(fakeDevice({ sdkInt: 22 }), fakeOptions({ allowDowngrade: false, allowTest: false }), '/data/local/tmp/x.apk')
   check('API 22 不应带 -g 参数', !args22.includes('-g'), args22.join(' '))
 
-  const args33 = installer.buildInstallArgs(fakeDevice({ sdkInt: 33 }), {
-    replace: true,
-    grantAll: true,
-    allowDowngrade: true,
-    allowTest: true,
-    launchAfterInstall: false
-  }, '/data/local/tmp/x.apk')
+  const args33 = installer.buildInstallArgs(fakeDevice({ sdkInt: 33 }), fakeOptions({ allowDowngrade: true, allowTest: true }), '/data/local/tmp/x.apk')
   check('API 33 应带 -g / -d / -t 参数', ['-g', '-d', '-t'].every((f) => args33.includes(f)), args33.join(' '))
 
   /* ------------------ 5b. 安装链路管道（不落包） ------------------ */
@@ -422,13 +428,7 @@ async function main(): Promise<void> {
     const handle = installer.install(
       dev,
       target,
-      {
-        replace: true,
-        grantAll: true,
-        allowDowngrade: false,
-        allowTest: false,
-        launchAfterInstall: false
-      },
+      fakeOptions(),
       (p: InstallProgress) => {
         const line = `${p.stage} ${p.indeterminate ? '…' : `${p.percent}%`} ${p.message}`
         if (seen[seen.length - 1] !== line) {

@@ -1,13 +1,18 @@
 import { randomUUID } from 'node:crypto'
+import { rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type {
   ApkInfo,
   DeviceInfo,
   InstallOptions,
   InstallProgress,
-  InstallResult
+  InstallResult,
+  SplitApk
 } from '@shared/types'
+import { selectionFor } from '../shared/compat'
 import { rawLines, type AdbManager } from './adb/manager'
+import { BundleExtractor } from './apk/bundle'
 
 /* ------------------------------------------------------------------ */
 /* 失败原因翻译                                                        */
@@ -234,6 +239,51 @@ export class Installer {
     return ['pm', 'install', ...flags, remote]
   }
 
+  /**
+   * 决定这次安装要不要走 root。
+   * hasRoot 为 null 表示还没测过 —— 这时才去测（会弹授权框）；
+   * 已知没有 root 就直接放弃，避免每次安装都白试一遍。
+   */
+  private async resolveRoot(device: DeviceInfo, options: InstallOptions): Promise<boolean> {
+    if (!options.rootInstall) return false
+    if (device.hasRoot === true) return true
+    if (device.hasRoot === false) return false
+    return this.adb.checkRoot(device)
+  }
+
+  /**
+   * 把一条 shell 命令包成「以 root 身份执行」。
+   * 我们所有远端路径都只含 [A-Za-z0-9._-/]，所以放进单引号是安全的。
+   */
+  private asRoot(cmd: string): string {
+    return `su -c '${cmd}'`
+  }
+
+  /** 执行一条 pm 命令，按需套上 su */
+  private runPm(
+    device: DeviceInfo,
+    useRoot: boolean,
+    cmd: string,
+    timeoutMs: number,
+    signal?: AbortSignal
+  ) {
+    return this.adb.shellOn(device, useRoot ? this.asRoot(cmd) : cmd, timeoutMs, signal)
+  }
+
+  /**
+   * root 强制卸载：签名不一致时普通覆盖安装必然失败，
+   * 只能把旧版本整个卸掉再装。**会清除应用数据**，所以由单独的开关控制。
+   */
+  private async forceUninstall(
+    device: DeviceInfo,
+    packageName: string
+  ): Promise<{ ok: boolean; out: string }> {
+    const safe = packageName.replace(/[^\w.]/g, '')
+    const r = await this.adb.shellOn(device, this.asRoot(`pm uninstall ${safe}`), 90000)
+    const out = `${r.stdout}\n${r.stderr}`.trim()
+    return { ok: /\bSuccess\b/i.test(r.stdout), out }
+  }
+
   install(
     device: DeviceInfo,
     apk: ApkInfo,
@@ -265,6 +315,11 @@ export class Installer {
 
       /* ------------------------ 1. 准备 ------------------------ */
       emit({ stage: 'preparing', percent: 0, indeterminate: true, message: '正在准备安装环境…' })
+
+      // 分包容器走 session API：install-create / install-write / install-commit
+      if (apk.bundle && apk.bundle.splits.length > 0) {
+        return this.installBundle(device, apk, options, emit, signal, startedAt, taskId, fail)
+      }
 
       const check = await this.adb.shellOn(device, 'echo ready', 10000, signal)
       if (check.code !== 0 || !check.stdout.includes('ready')) {
@@ -351,29 +406,69 @@ export class Installer {
 
       /* ------------------------ 3. 安装 ------------------------ */
       const args = this.buildInstallArgs(device, options, remote)
+      const useRoot = await this.resolveRoot(device, options)
+      const pmCmd = args.join(' ')
+
       emit({
         stage: 'installing',
         percent: 100,
         indeterminate: true,
-        message: '正在安装，请稍候…',
-        raw: `$ ${args.join(' ')}`
+        message: useRoot ? '正在以 root 身份安装…' : '正在安装，请稍候…',
+        raw: `$ ${useRoot ? this.asRoot(pmCmd) : pmCmd}`
       })
 
-      const install = await this.adb.shellOn(device, args.join(' '), 300000, signal)
-      const out = `${install.stdout}\n${install.stderr}`.trim()
+      let install = await this.runPm(device, useRoot, pmCmd, 300000, signal)
+      let out = `${install.stdout}\n${install.stderr}`.trim()
 
       if (signal.aborted) {
         await this.cleanup(device, remote)
         return fail('已取消', '安装已被用户取消。', out)
       }
 
-      const succeeded = /\bSuccess\b/i.test(install.stdout)
+      let succeeded = /\bSuccess\b/i.test(install.stdout)
+      let forcedUninstall = false
+
+      // 签名冲突这类问题，普通覆盖安装无解 —— root 下可以「卸载后重装」
+      if (!succeeded && options.rootForceUninstall && apk.packageName) {
+        const hasRoot = device.hasRoot ?? (await this.resolveRoot(device, options))
+        const mismatch =
+          /INSTALL_FAILED_UPDATE_INCOMPATIBLE|INSTALL_FAILED_SHARED_USER_INCOMPATIBLE|INSTALL_FAILED_DUPLICATE_PERMISSION|INSTALL_FAILED_VERSION_DOWNGRADE/i.test(
+            out
+          )
+        if (hasRoot && mismatch) {
+          emit({
+            stage: 'installing',
+            percent: 100,
+            indeterminate: true,
+            message: '签名冲突，正在卸载旧版本…'
+          })
+          const un = await this.forceUninstall(device, apk.packageName)
+          if (un.ok) {
+            forcedUninstall = true
+            emit({
+              stage: 'installing',
+              percent: 100,
+              indeterminate: true,
+              message: '旧版本已卸载，正在重新安装…'
+            })
+            install = await this.runPm(device, true, pmCmd, 300000, signal)
+            out = `${install.stdout}\n${install.stderr}`.trim()
+            succeeded = /\bSuccess\b/i.test(install.stdout)
+          } else {
+            out = `${out}\n[卸载失败] ${un.out}`
+          }
+        }
+      }
 
       if (!succeeded) {
         // 失败时也要清掉远端残留，避免 /data/local/tmp 堆积垃圾
         await this.cleanup(device, remote)
         const friendly = translateInstallError(out)
         return fail(friendly.title, friendly.detail, out)
+      }
+
+      if (forcedUninstall) {
+        out = `已强制卸载旧版本并重新安装（旧版本的应用数据已被清除）\n${out}`
       }
 
       /* ------------------------ 4. 清理 ------------------------ */
@@ -421,6 +516,253 @@ export class Installer {
 
   private async cleanup(device: DeviceInfo, remote: string): Promise<void> {
     await this.adb.shellOn(device, `rm -f '${remote}'`, 10000)
+  }
+
+  /**
+   * 分包安装：install-create / install-write × N / install-commit。
+   *
+   * 为什么不用 `adb install-multiple`：它把推送和安装揉在一起，拿不到进度。
+   * 走 session API 可以先逐个推送（按字节报进度），再一次性提交。
+   */
+  private async installBundle(
+    device: DeviceInfo,
+    apk: ApkInfo,
+    options: InstallOptions,
+    emit: (p: Omit<InstallProgress, 'taskId'>) => void,
+    signal: AbortSignal,
+    startedAt: number,
+    taskId: string,
+    fail: (title: string, detail: string, rawOutput?: string) => InstallResult
+  ): Promise<InstallResult> {
+    const bundle = apk.bundle!
+    const sel = selectionFor(apk, device)
+    if (!sel || sel.error) {
+      return fail('分包与设备不匹配', sel?.error ?? '无法确定要安装哪些分包')
+    }
+
+    const picked = sel.splits.filter((s) => s.selected)
+    if (!picked.some((s) => s.kind === 'base')) {
+      return fail('缺少主体分包', '这个分包容器里没有 base 分包，无法安装')
+    }
+
+    const totalBytes = picked.reduce((n, s) => n + s.rawSize, 0)
+    const remoteDir = `/data/local/tmp/winstall_${Date.now().toString(36)}`
+    const tmpDir = path.join(tmpdir(), `winstall-install-${taskId}`)
+    let extractor: BundleExtractor | null = null
+    const useRoot = await this.resolveRoot(device, options)
+
+    const cleanup = async (): Promise<void> => {
+      await this.adb.shellOn(device, `rm -rf ${remoteDir}`, 15000).catch(() => undefined)
+    }
+
+    try {
+      /* ------------------------ 解压选中的分包 ------------------------ */
+      emit({
+        stage: 'preparing',
+        percent: 0,
+        indeterminate: true,
+        message: `正在解压 ${picked.length} 个分包…`
+      })
+
+      extractor = await BundleExtractor.open(apk.filePath, tmpDir)
+      const items: Array<{ split: SplitApk; local: string; name: string }> = []
+      let seq = 0
+      for (const s of picked) {
+        const raw = s.entryName.split('/').pop() ?? `split${seq}`
+        const safe = raw.replace(/[^\w.\-]/g, '_')
+        const name = `${String(seq).padStart(2, '0')}_${safe}`
+        const local = await extractor.extract(s.entryName, name)
+        items.push({ split: s, local, name })
+        seq++
+      }
+      await extractor.close()
+      extractor = null
+
+      if (signal.aborted) {
+        await cleanup()
+        return fail('已取消', '安装已被用户取消。')
+      }
+
+      /* ------------------------ 逐个推送 ------------------------ */
+      await this.adb.shellOn(device, `mkdir -p ${remoteDir}`, 15000, signal)
+
+      let sent = 0
+      for (let i = 0; i < items.length; i++) {
+        if (signal.aborted) {
+          await cleanup()
+          return fail('已取消', '安装已被用户取消。')
+        }
+        const it = items[i]
+        const remote = `${remoteDir}/${it.name}`
+        emit({
+          stage: 'pushing',
+          percent: Math.min(99, Math.floor((sent / totalBytes) * 100)),
+          indeterminate: false,
+          message: `正在推送分包 ${i + 1} / ${items.length}…`,
+          bytesSent: sent,
+          bytesTotal: totalBytes
+        })
+        const push = await this.adb.execOn(device, ['push', it.local, remote], 600000, signal)
+        if (push.code !== 0) {
+          await cleanup()
+          return fail(
+            '推送分包失败',
+            push.stderr.trim() || push.stdout.trim() || `退出码 ${push.code}`
+          )
+        }
+        sent += it.split.rawSize
+        emit({
+          stage: 'pushing',
+          percent: Math.min(99, Math.floor((sent / totalBytes) * 100)),
+          indeterminate: false,
+          message: `正在推送分包 ${i + 1} / ${items.length}…`,
+          bytesSent: sent,
+          bytesTotal: totalBytes
+        })
+      }
+
+      emit({
+        stage: 'pushing',
+        percent: 100,
+        indeterminate: false,
+        message: '分包已全部就绪',
+        bytesSent: totalBytes,
+        bytesTotal: totalBytes
+      })
+
+      /* ------------------------ 创建安装会话 ------------------------ */
+      emit({ stage: 'installing', percent: 100, indeterminate: true, message: '正在创建安装会话…' })
+
+      const createFlags = ['pm', 'install-create', '-r', '-S', String(totalBytes)]
+      if (options.allowDowngrade) createFlags.push('-d')
+      if (options.allowTest) createFlags.push('-t')
+      // -g 是 API 23 才有的参数，老系统传了会直接报错
+      if (options.grantAll && device.sdkInt != null && device.sdkInt >= 23) createFlags.push('-g')
+
+      const create = await this.runPm(device, useRoot, createFlags.join(' '), 60000, signal)
+      const createOut = `${create.stdout}\n${create.stderr}`.trim()
+      const sid = /\[(\d+)\]/.exec(createOut)?.[1]
+      if (!sid) {
+        await cleanup()
+        return fail('创建安装会话失败', createOut || '设备没有返回会话 ID', createOut)
+      }
+
+      /* ------------------------ 写入各分包 ------------------------ */
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i]
+        emit({
+          stage: 'installing',
+          percent: 100,
+          indeterminate: true,
+          message: `正在写入分包 ${i + 1} / ${items.length}…`,
+          raw: `pm install-write ${sid} ${it.name}`
+        })
+        const w = await this.runPm(
+          device,
+          useRoot,
+          `pm install-write -S ${it.split.rawSize} ${sid} ${it.name} ${remoteDir}/${it.name}`,
+          180000,
+          signal
+        )
+        const wOut = `${w.stdout}\n${w.stderr}`.trim()
+        if (!/\bSuccess\b/i.test(w.stdout)) {
+          await this.runPm(device, useRoot, `pm install-abandon ${sid}`, 30000).catch(() => undefined)
+          await cleanup()
+          const friendly = translateInstallError(wOut)
+          return fail(friendly.title, friendly.detail, wOut)
+        }
+      }
+
+      /* ------------------------ 提交 ------------------------ */
+      emit({ stage: 'installing', percent: 100, indeterminate: true, message: '正在提交安装…' })
+      let commit = await this.runPm(device, useRoot, `pm install-commit ${sid}`, 300000, signal)
+      let commitOut = `${commit.stdout}\n${commit.stderr}`.trim()
+
+      if (signal.aborted) {
+        await cleanup()
+        return fail('已取消', '安装已被用户取消。', commitOut)
+      }
+
+      let committed = /\bSuccess\b/i.test(commit.stdout)
+      let forcedUninstall = false
+
+      // 签名冲突：root 下卸载旧版本再重试一次
+      if (!committed && options.rootForceUninstall && apk.packageName) {
+        const hasRoot = device.hasRoot ?? (await this.resolveRoot(device, options))
+        const mismatch =
+          /INSTALL_FAILED_UPDATE_INCOMPATIBLE|INSTALL_FAILED_SHARED_USER_INCOMPATIBLE|INSTALL_FAILED_DUPLICATE_PERMISSION/i.test(
+            commitOut
+          )
+        if (hasRoot && mismatch) {
+          emit({ stage: 'installing', percent: 100, indeterminate: true, message: '签名冲突，正在卸载旧版本…' })
+          const un = await this.forceUninstall(device, apk.packageName)
+          if (un.ok) {
+            forcedUninstall = true
+            emit({ stage: 'installing', percent: 100, indeterminate: true, message: '旧版本已卸载，正在重新安装…' })
+            commit = await this.runPm(device, useRoot, `pm install-commit ${sid}`, 300000, signal)
+            commitOut = `${commit.stdout}\n${commit.stderr}`.trim()
+            committed = /\bSuccess\b/i.test(commit.stdout)
+          } else {
+            commitOut = `${commitOut}\n[卸载失败] ${un.out}`
+          }
+        }
+      }
+
+      if (!committed) {
+        await cleanup()
+        const friendly = translateInstallError(commitOut)
+        return fail(friendly.title, friendly.detail, commitOut)
+      }
+
+      if (forcedUninstall) {
+        commitOut = `已强制卸载旧版本并重新安装（旧版本的应用数据已被清除）\n${commitOut}`
+      }
+
+      /* ------------------------ OBB 数据 ------------------------ */
+      if (bundle.obbFiles.length > 0 && apk.packageName) {
+        emit({ stage: 'cleaning', percent: 100, indeterminate: true, message: '正在推送 OBB 数据…' })
+        extractor = await BundleExtractor.open(apk.filePath, tmpDir)
+        const obbDir = `/sdcard/Android/obb/${apk.packageName}`
+        await this.adb.shellOn(device, `mkdir -p ${obbDir}`, 15000)
+        for (const entry of bundle.obbFiles) {
+          const fileName = (entry.split('/').pop() ?? 'data.obb').replace(/[^\w.\-]/g, '_')
+          const local = await extractor.extract(entry, `obb_${fileName}`)
+          await this.adb.execOn(device, ['push', local, `${obbDir}/${fileName}`], 600000)
+        }
+        await extractor.close()
+        extractor = null
+      }
+
+      await cleanup()
+
+      if (options.launchAfterInstall && apk.packageName) {
+        await this.adb.shellOn(
+          device,
+          `monkey -p ${apk.packageName} -c android.intent.category.LAUNCHER 1`,
+          15000
+        )
+      }
+
+      emit({ stage: 'success', percent: 100, indeterminate: false, message: '安装成功' })
+      return {
+        taskId,
+        ok: true,
+        stage: 'success',
+        rawOutput: commitOut,
+        packageName: apk.packageName,
+        durationMs: Date.now() - startedAt
+      }
+    } catch (err) {
+      await cleanup()
+      return fail('分包安装出错', err instanceof Error ? err.message : String(err))
+    } finally {
+      await extractor?.dispose().catch(() => undefined)
+      try {
+        rmSync(tmpDir, { recursive: true, force: true })
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   /** 启动已安装应用的主界面 */

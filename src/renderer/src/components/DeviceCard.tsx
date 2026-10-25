@@ -1,4 +1,5 @@
 import AppsRoundedIcon from '@mui/icons-material/AppsRounded'
+import KeyRoundedIcon from '@mui/icons-material/KeyRounded'
 import MemoryRoundedIcon from '@mui/icons-material/MemoryRounded'
 import PhoneAndroidRoundedIcon from '@mui/icons-material/PhoneAndroidRounded'
 import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded'
@@ -208,6 +209,9 @@ export function DeviceCard({ device, onManageApps }: { device: DeviceInfo; onMan
                   />
                 )}
                 {device.isEmulator && <MetaChip label="模拟器" />}
+                {device.hasRoot === true && (
+                  <MetaChip icon={<KeyRoundedIcon sx={{ fontSize: 14 }} />} label="Root" emphasis />
+                )}
               </Stack>
             </Box>
           ) : (

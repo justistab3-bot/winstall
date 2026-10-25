@@ -47,9 +47,58 @@ export interface DeviceInfo {
   manufacturer: string | null
   brand: string | null
   isEmulator: boolean
+  /** 屏幕密度（dpi），用于挑选密度分包 */
+  densityDpi: number | null
+  /** 系统语言，如 zh-CN，用于挑选语言分包 */
+  locale: string | null
   /** 剩余存储（字节） */
   storageFreeBytes: number | null
   batteryLevel: number | null
+  /**
+   * 是否具备 root 权限。
+   * null 表示尚未检测（检测会触发设备上的 su 授权弹窗，所以只在需要时才测）。
+   */
+  hasRoot: boolean | null
+}
+
+/* ------------------------------ 分包安装 ------------------------------ */
+
+/** 安装包容器类型 */
+export type BundleKind = 'apk' | 'apks' | 'xapk' | 'apkm'
+
+/** 分包的作用 */
+export type SplitKind = 'base' | 'abi' | 'density' | 'language' | 'texture' | 'other'
+
+export interface SplitApk {
+  /** ZIP 内的条目名 */
+  entryName: string
+  /** 压缩后大小（字节） */
+  size: number
+  /** 解压后大小（字节） */
+  rawSize: number
+  kind: SplitKind
+  /** 原始配置标识，如 arm64_v8a / xxhdpi / zh_CN */
+  config: string | null
+  /** kind === 'abi' 时归一化后的 ABI 名，如 arm64-v8a */
+  abi: string | null
+  /** 是否被选中安装 */
+  selected: boolean
+}
+
+export interface BundleInfo {
+  kind: BundleKind
+  /** 全部分包（含 base） */
+  splits: SplitApk[]
+  /** 需要额外推送到 /sdcard/Android/obb/<包名>/ 的文件条目名 */
+  obbFiles: string[]
+  /** 被选中的分包数（含 base） */
+  selectedCount: number
+  /** 被选中的分包解压后总字节数 */
+  selectedBytes: number
+  /** 分包解析/选择过程中的问题（非致命） */
+  warning: string | null
+  /** 致命错误：例如没有任何 ABI 分包匹配当前设备 */
+  error: string | null
 }
 
 export interface ApkInfo {
@@ -76,6 +125,10 @@ export interface ApkInfo {
   permissions: string[]
   parseError: string | null
   parsedAt: number
+  /** 容器类型：单 APK 或分包容器 */
+  bundleKind: BundleKind
+  /** 分包信息；单 APK 时为 null */
+  bundle: BundleInfo | null
 }
 
 export type CompatLevel = 'ok' | 'info' | 'warning' | 'error'
@@ -146,6 +199,13 @@ export interface InstallOptions {
   allowTest: boolean
   /** 安装后自动启动主 Activity */
   launchAfterInstall: boolean
+  /** 通过 su 以 root 身份执行 pm，绕过厂商限制与部分校验 */
+  rootInstall: boolean
+  /**
+   * 签名冲突 / 无法覆盖时，先卸载旧版本再装。
+   * **会清除应用数据**，因此单独开关，默认关闭。
+   */
+  rootForceUninstall: boolean
 }
 
 /* ------------------------------ 应用管理 ------------------------------ */
@@ -297,5 +357,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   launchAfterInstall: false,
   autoCleanup: true,
   dynamicColor: true,
-  batchInstall: true
+  batchInstall: true,
+  rootInstall: false,
+  rootForceUninstall: false
 }

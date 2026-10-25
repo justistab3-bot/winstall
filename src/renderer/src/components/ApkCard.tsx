@@ -19,6 +19,7 @@ import {
 } from '@mui/material'
 import { AnimatePresence, motion } from 'framer-motion'
 import type { ApkInfo, CompatReport, DeviceInfo, InstallProgress } from '@shared/types'
+import { selectionFor } from '@shared/compat'
 import { useTokens } from '../theme'
 import { formatBytes } from '../format'
 import { CompatBanner } from './CompatBanner'
@@ -165,8 +166,20 @@ export function ApkCard({
   if (apk.versionName) chips.push({ label: `v${apk.versionName}` })
   if (apk.minSdk != null) chips.push({ label: `minSdk ${apk.minSdk}` })
   if (apk.targetSdk != null) chips.push({ label: `targetSdk ${apk.targetSdk}` })
-  if (apk.nativeAbis.length > 0) chips.push({ label: apk.nativeAbis.join(' / ') })
-  else chips.push({ label: '无 native 库' })
+
+  // 分包容器：显示容器类型与实际会被安装的分包数
+  const bundleSel = selectionFor(apk, device)
+  if (apk.bundle && bundleSel) {
+    const picked = bundleSel.splits.filter((s) => s.selected).length
+    const total = bundleSel.splits.length
+    chips.push({ label: `${apk.bundleKind.toUpperCase()} 分包 ${picked}/${total}` })
+    if (bundleSel.matchedAbi) chips.push({ label: bundleSel.matchedAbi })
+  } else if (apk.nativeAbis.length > 0) {
+    chips.push({ label: apk.nativeAbis.join(' / ') })
+  } else {
+    chips.push({ label: '无 native 库' })
+  }
+
   if (apk.debuggable) chips.push({ label: '可调试' })
 
   return (

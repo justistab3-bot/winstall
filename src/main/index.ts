@@ -206,7 +206,9 @@ function registerIpc(): void {
           isSplit: false,
           permissions: [],
           parseError: err instanceof Error ? err.message : String(err),
-          parsedAt: Date.now()
+          parsedAt: Date.now(),
+          bundleKind: 'apk',
+          bundle: null
         })
       }
     }
@@ -252,7 +254,9 @@ function registerIpc(): void {
         grantAll: payload.options?.grantAll ?? s.grantAll,
         allowDowngrade: payload.options?.allowDowngrade ?? s.allowDowngrade,
         allowTest: payload.options?.allowTest ?? s.allowTest,
-        launchAfterInstall: payload.options?.launchAfterInstall ?? s.launchAfterInstall
+        launchAfterInstall: payload.options?.launchAfterInstall ?? s.launchAfterInstall,
+        rootInstall: payload.options?.rootInstall ?? s.rootInstall,
+        rootForceUninstall: payload.options?.rootForceUninstall ?? s.rootForceUninstall
       }
 
       const handle = installer.install(device, apk, options, (p: InstallProgress) => {
@@ -346,6 +350,17 @@ function registerIpc(): void {
     const next = settings.set((patch ?? {}) as Partial<AppSettings>)
     const p = (patch ?? {}) as Partial<AppSettings>
     if ('theme' in p) applyTheme(next.theme)
+    if ('rootInstall' in p) {
+      adb.detectRootOnEnrich = next.rootInstall
+      if (next.rootInstall) {
+        // 打开开关后立刻对已连接的设备测一次 root
+        void (async () => {
+          for (const d of adb.getDevices()) {
+            if (d.state === 'device' && d.hasRoot == null) await adb.checkRoot(d)
+          }
+        })()
+      }
+    }
     if ('dynamicColor' in p) {
       void (async () => {
         colorState = await computeDynamicColor(next.dynamicColor)
@@ -419,6 +434,8 @@ if (!gotLock) {
       home: app.getPath('home')
     })
     adb.adbPathOverride = settings.get().adbPathOverride
+    // 只有用户开启 Root 强制安装时才去检测 root，避免无谓地弹授权框
+    adb.detectRootOnEnrich = settings.get().rootInstall
     installer = new Installer(adb)
     appManager = new AppManager(adb)
 

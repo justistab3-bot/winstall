@@ -1,4 +1,5 @@
-import type { ApkInfo, CompatIssue, CompatReport, DeviceInfo } from '@shared/types'
+import type { ApkInfo, CompatIssue, CompatReport, DeviceInfo, SplitApk } from '@shared/types'
+import { selectSplits, type SplitSelection } from './bundle'
 
 /** API Level → 版本号 / 代号 */
 const ANDROID_VERSIONS: Record<number, { v: string; name: string }> = {
@@ -116,6 +117,47 @@ function fmtSize(bytes: number): string {
 }
 
 const LEVEL_WEIGHT = { ok: 0, info: 1, warning: 2, error: 3 } as const
+
+/** 按当前设备为分包容器挑选要安装的分包 */
+export function selectionFor(apk: ApkInfo, device: DeviceInfo | null): SplitSelection | null {
+  if (!apk.bundle || apk.bundle.splits.length === 0) return null
+  return selectSplits(apk.bundle.splits, {
+    abiList: device?.abiList ?? [],
+    densityDpi: device?.densityDpi ?? null,
+    locale: device?.locale ?? null
+  })
+}
+
+/** 把「选了哪些分包、为什么」讲清楚 */
+function describeSelection(sel: SplitSelection, device: DeviceInfo): string {
+  const picked = sel.splits.filter((s) => s.selected)
+  const parts: string[] = []
+
+  const base = picked.find((s) => s.kind === 'base')
+  if (base) parts.push('base（主体）')
+
+  const abis = picked.filter((s) => s.kind === 'abi').map((s) => s.abi).filter(Boolean)
+  if (abis.length > 0) {
+    parts.push(`${abis.join('、')}（架构，设备支持 ${device.abiList.join('、') || '未知'}）`)
+  }
+
+  const dens = picked.filter((s) => s.kind === 'density').map((s) => s.config).filter(Boolean)
+  if (dens.length > 0) {
+    parts.push(`${dens.join('、')}（屏幕密度${device.densityDpi ? ` ${device.densityDpi}dpi` : ''}）`)
+  }
+
+  const langs = picked.filter((s) => s.kind === 'language').map((s) => s.config).filter(Boolean)
+  if (langs.length > 0) {
+    parts.push(`${langs.length} 个语言包`)
+  }
+
+  const others = picked.length - (base ? 1 : 0) - abis.length - dens.length - langs.length
+  if (others > 0) parts.push(`${others} 个其他分包`)
+
+  const skipped = sel.splits.length - picked.length
+  const tail = skipped > 0 ? `，已跳过 ${skipped} 个与设备不匹配的分包` : ''
+  return `包含 ${parts.join('、')}${tail}。`
+}
 
 /**
  * 综合判定 APK 能否装到设备上。
@@ -248,7 +290,37 @@ export function evaluateCompat(apk: ApkInfo | null, device: DeviceInfo | null): 
 
   /* ------------------------- CPU 架构 ------------------------- */
   let matchedAbi: string | null = null
-  if (apk.hasNativeLibs && apk.nativeAbis.length > 0) {
+  const bundleSel = selectionFor(apk, device)
+
+  if (bundleSel) {
+    // 分包容器：native 库在各配置分包里，base 本身通常是「纯 Java」，
+    // 所以不能走下面按 base 的 nativeAbis 判断的普通逻辑。
+    matchedAbi = bundleSel.matchedAbi
+    if (bundleSel.error) {
+      issues.push({
+        level: 'error',
+        code: 'bundle-no-abi',
+        title: '分包与设备架构不匹配',
+        detail: bundleSel.error
+      })
+    } else {
+      const picked = bundleSel.splits.filter((s) => s.selected).length
+      issues.push({
+        level: 'ok',
+        code: 'bundle-splits',
+        title: `分包安装（已为当前设备选择 ${picked} / ${bundleSel.splits.length} 个）`,
+        detail: describeSelection(bundleSel, device)
+      })
+      if (bundleSel.warning) {
+        issues.push({
+          level: 'warning',
+          code: 'bundle-warning',
+          title: '分包选择有降级',
+          detail: bundleSel.warning
+        })
+      }
+    }
+  } else if (apk.hasNativeLibs && apk.nativeAbis.length > 0) {
     matchedAbi = pickMatchedAbi(apk.nativeAbis, device.abiList)
     const apkIs64Only = apk.nativeAbis.every(is64BitAbi)
     const apkIs32Only = apk.nativeAbis.every((a) => !is64BitAbi(a))
@@ -301,9 +373,13 @@ export function evaluateCompat(apk: ApkInfo | null, device: DeviceInfo | null): 
   }
 
   /* ------------------------- 存储空间 ------------------------- */
-  if (device.storageFreeBytes != null && apk.fileSize > 0) {
-    // 安装后大致占用：APK + 解压后的 dex/so，保守按 3 倍估算
-    const need = apk.fileSize * 3
+  // 分包容器实际只传输被选中的那几个分包，按容器的总大小估会严重高估
+  const transferBytes = bundleSel
+    ? bundleSel.splits.filter((s) => s.selected).reduce((sum, s) => sum + s.rawSize, 0)
+    : apk.fileSize
+  if (device.storageFreeBytes != null && transferBytes > 0) {
+    // 安装后大致占用：安装包 + 解压后的 dex/so，保守按 3 倍估算
+    const need = transferBytes * 3
     if (device.storageFreeBytes < need) {
       issues.push({
         level: 'warning',
@@ -311,13 +387,14 @@ export function evaluateCompat(apk: ApkInfo | null, device: DeviceInfo | null): 
         title: '存储空间可能不足',
         detail:
           `设备剩余 ${fmtSize(device.storageFreeBytes)}，` +
-          `安装包 ${fmtSize(apk.fileSize)}，安装过程预计需要约 ${fmtSize(need)}。`
+          `安装包 ${fmtSize(transferBytes)}，安装过程预计需要约 ${fmtSize(need)}。`
       })
     }
   }
 
   /* ------------------------- 其他 ------------------------- */
-  if (apk.isSplit) {
+  // 分包容器本身不算 split APK（它是完整的一组分包）
+  if (apk.isSplit && !apk.bundle) {
     issues.push({
       level: 'warning',
       code: 'split-apk',

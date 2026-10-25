@@ -87,7 +87,7 @@ export function DropZone({ onPick, dragging, disabled }: Props) {
             {dragging ? '松开即可载入安装包' : '拖入 APK 安装包'}
           </Typography>
           <Typography sx={{ fontSize: 12.5, color: t.onSurfaceVariant, mt: 0.5 }}>
-            也可以点击此处从文件管理器选择，支持同时拖入多个
+            也可以点击此处从文件管理器选择，支持 .apk / .apks / .xapk，可同时拖入多个
           </Typography>
         </Box>
 
